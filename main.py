@@ -1,6 +1,6 @@
 # main.py
 # - 10분 고정 블록으로 분할하여 표시
-# - 이상치: 같은 블록 안에서 "블록 평균보다 큰 값"이 연속으로 나타나는 구간
+# - 이상치: 같은 블록 안에서 "블록 평균 ± 임계치(기본 ±40)를 벗어나는 값"이 연속으로 나타나는 구간
 # - 이상 구간은 연한 주황색 음영으로 표시(color="orange", alpha=0.15)
 # - 리샘플링 없음, 밀리초 제외(초 단위)
 # - 그래프 저장: 개별 블록 PNG, 전체 블록 ZIP
@@ -43,25 +43,33 @@ setup_korean_font()
 # -------------------- Streamlit 기본 --------------------
 st.set_page_config(page_title="에너지 로그: 10분 블록 뷰어", layout="wide")
 st.title("📊 에너지 로그 10분 블록 뷰어")
-st.caption("리샘플링 없이 원본 사용 · 밀리초 제외(초 단위) · "
-           "블록 평균보다 큰 값의 '연속 구간'을 이상치로 표시 · 그래프 저장 지원")
+st.caption(
+    "리샘플링 없이 원본 사용 · 밀리초 제외(초 단위) · "
+    "블록 평균 ± 임계치(기본 ±40)를 **벗어나는 값의 연속 구간**을 이상치로 표시 · 그래프 저장 지원"
+)
 
 # -------------------- 사이드바 --------------------
 st.sidebar.title("설정")
 block_minutes = st.sidebar.number_input("블록 크기 (분)", min_value=1, max_value=180, value=10, step=1)
 streak_min = st.sidebar.number_input("이상치 최소 연속 길이(개)", min_value=1, max_value=1000, value=2, step=1)
-tz = st.sidebar.text_input("타임존(예: Asia/Seoul)", value="Asia/Seoul")
+threshold_abs = st.sidebar.number_input("임계치 (±)", min_value=0.0, value=40.0, step=1.0)
 show_all = st.sidebar.checkbox("모든 블록 그래프 한꺼번에 보기", value=False)
 max_show = st.sidebar.number_input("한꺼번에 그릴 최대 블록 수(성능 보호)", min_value=1, max_value=300, value=30)
 
-uploaded_files = st.file_uploader("로그 파일 업로드(여러 개 가능, .csv/.txt/.log)",
-                                  type=["csv", "txt", "log"], accept_multiple_files=True)
+uploaded_files = st.file_uploader(
+    "로그 파일 업로드(여러 개 가능, .csv/.txt/.log)",
+    type=["csv", "txt", "log"],
+    accept_multiple_files=True
+)
 
-st.markdown("""
-**파일 형식 예시**
-2025/07/07 05:00:02.555 , 1781.77
-2025/07/07 05:00:05.586 , 1784.21왼쪽은 타임스탬프(밀리초 포함 가능), 오른쪽은 수치입니다. 쉼표와 공백은 유연하게 처리합니다.
-""")
+st.markdown(
+    """
+**파일 형식 예시**  
+2025/07/07 05:00:02.555 , 1781.77  
+2025/07/07 05:00:05.586 , 1784.21  
+왼쪽은 타임스탬프(밀리초 포함 가능), 오른쪽은 수치입니다. 쉼표와 공백은 유연하게 처리합니다.
+"""
+)
 
 # -------------------- 유틸 --------------------
 def safe_name(s: str) -> str:
@@ -90,13 +98,7 @@ def load_log(file) -> pd.DataFrame:
     # 밀리초 제외(초 단위 내림)
     df["timestamp"] = df["timestamp"].dt.floor("S")
     df = df.dropna(subset=["timestamp", "value"]).copy()
-    # 타임존 지정(가능하면)
-    if tz:
-        try:
-            if df["timestamp"].dt.tz is None:
-                df["timestamp"] = df["timestamp"].dt.tz_localize(tz, nonexistent="shift_forward", ambiguous="NaT")
-        except Exception:
-            pass
+    # (요청) 타임존/현재 시각 정보 사용하지 않음 → 로컬라이즈/변환 제거
     return df.sort_values("timestamp")
 
 # -------------------- 블록 분할 --------------------
@@ -108,9 +110,12 @@ def split_into_blocks(df: pd.DataFrame, minutes: int) -> Dict[pd.Timestamp, pd.D
     return blocks
 
 # -------------------- 이상치(연속 구간) 탐지 --------------------
-def find_consecutive_runs_above_mean(block_df: pd.DataFrame, min_len: int) -> List[Tuple[pd.Timestamp, pd.Timestamp]]:
+def find_consecutive_runs_outside_band(
+    block_df: pd.DataFrame, min_len: int, threshold: float
+) -> List[Tuple[pd.Timestamp, pd.Timestamp]]:
     """
-    블록 평균보다 큰 값이 연속으로 나타나는 구간(start_ts, end_ts) 리스트를 반환.
+    블록 평균 ± threshold 를 벗어나는 값(|x - mean| > threshold)이
+    연속으로 나타나는 구간(start_ts, end_ts) 리스트를 반환.
     min_len 이상 길이의 연속 구간만 유지.
     """
     if block_df.empty:
@@ -120,35 +125,34 @@ def find_consecutive_runs_above_mean(block_df: pd.DataFrame, min_len: int) -> Li
     values = block_df["value"].to_numpy()
     times = block_df["timestamp"].to_numpy()
 
-    is_above = values > mean_val
+    is_out = np.abs(values - mean_val) > float(threshold)
     runs: List[Tuple[int, int]] = []  # (start_idx, end_idx) inclusive
 
     start = None
-    for i, flag in enumerate(is_above):
+    for i, flag in enumerate(is_out):
         if flag and start is None:
             start = i
         elif (not flag) and (start is not None):
             runs.append((start, i - 1))
             start = None
     if start is not None:
-        runs.append((start, len(is_above) - 1))
+        runs.append((start, len(is_out) - 1))
 
-    # min_len 필터
     good_runs = [(s, e) for s, e in runs if (e - s + 1) >= int(min_len)]
 
-    # 타임스탬프로 변환
     intervals: List[Tuple[pd.Timestamp, pd.Timestamp]] = []
     for s, e in good_runs:
         intervals.append((pd.Timestamp(times[s]), pd.Timestamp(times[e])))
     return intervals
 
-def analyze_block(block_df: pd.DataFrame, min_streak: int) -> Dict:
+def analyze_block(block_df: pd.DataFrame, min_streak: int, threshold: float) -> Dict:
     mean_val = float(block_df["value"].mean())
-    intervals = find_consecutive_runs_above_mean(block_df, min_streak)
+    intervals = find_consecutive_runs_outside_band(block_df, min_streak, threshold)
     start_ts = block_df["timestamp"].min()
     end_ts = block_df["timestamp"].max()
     return {
         "mean": mean_val,
+        "threshold": float(threshold),
         "intervals": intervals,            # 연속 이상 구간들
         "is_anomaly": len(intervals) > 0,  # 하나라도 있으면 이상 블록
         "start": start_ts,
@@ -166,10 +170,17 @@ def plot_block(block_df: pd.DataFrame, info: Dict, title: str):
     # 블록 평균선
     ax.axhline(info["mean"], linestyle="--", linewidth=1, label="블록 평균")
 
-    # 평균 초과 포인트 마커
-    above = block_df[block_df["value"] > info["mean"]]
-    if not above.empty:
-        ax.scatter(above["timestamp"], above["value"], marker="o", s=30, label="평균 초과", zorder=3)
+    # 임계 밴드(±threshold): 빨간 점선
+    upper = info["mean"] + info["threshold"]
+    lower = info["mean"] - info["threshold"]
+    ax.axhline(upper, color="red", linestyle="--", linewidth=1, label=f"임계 상한(+{info['threshold']:.2f})")
+    ax.axhline(lower, color="red", linestyle="--", linewidth=1, label=f"임계 하한(-{info['threshold']:.2f})")
+
+    # 임계 초과 포인트 마커
+    out_mask = (block_df["value"] > upper) | (block_df["value"] < lower)
+    out_df = block_df[out_mask]
+    if not out_df.empty:
+        ax.scatter(out_df["timestamp"], out_df["value"], marker="o", s=30, label="임계 초과", zorder=3)
 
     # 연속 이상 구간을 연한 주황색으로 음영 표시
     for (s, e) in info["intervals"]:
@@ -188,8 +199,12 @@ def plot_block(block_df: pd.DataFrame, info: Dict, title: str):
     return fig
 
 # -------------------- ZIP 생성 --------------------
-def render_all_blocks_to_zip(blocks: Dict[pd.Timestamp, pd.DataFrame], infos: Dict[pd.Timestamp, Dict],
-                             base_prefix: str, limit: int | None = None) -> bytes:
+def render_all_blocks_to_zip(
+    blocks: Dict[pd.Timestamp, pd.DataFrame],
+    infos: Dict[pd.Timestamp, Dict],
+    base_prefix: str,
+    limit: int | None = None
+) -> bytes:
     mem = io.BytesIO()
     with zipfile.ZipFile(mem, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
         keys = list(blocks.keys())
@@ -197,7 +212,10 @@ def render_all_blocks_to_zip(blocks: Dict[pd.Timestamp, pd.DataFrame], infos: Di
             keys = keys[:limit]
         for i, k in enumerate(keys, start=1):
             info = infos[k]
-            title = f"{k.isoformat()} ~ {info['end'].isoformat()} | 이상치:{'예' if info['is_anomaly'] else '아니오'}"
+            title = (
+                f"{k.isoformat()} ~ {info['end'].isoformat()} | "
+                f"이상치:{'예' if info['is_anomaly'] else '아니오'}"
+            )
             fig = plot_block(blocks[k], info, title)  # 화면에도 렌더됨
             png_bytes = fig_to_png_bytes(fig)
             plt.close(fig)
@@ -236,7 +254,7 @@ if not block_keys:
 rows = []
 infos: Dict[pd.Timestamp, Dict] = {}
 for k in block_keys:
-    info = analyze_block(blocks[k], streak_min)
+    info = analyze_block(blocks[k], streak_min, threshold_abs)
     infos[k] = info
     rows.append({
         "블록 시작": k.isoformat(),
@@ -259,8 +277,12 @@ st.download_button("블록 요약 CSV 다운로드", data=csv_bytes, file_name="
 
 # ZIP 저장
 st.markdown("### 💾 모든 블록 그래프 저장 (ZIP)")
-max_zip = st.number_input("ZIP으로 저장할 최대 블록 수(성능 보호)", min_value=1, max_value=len(block_keys),
-                          value=min(len(block_keys), 100))
+max_zip = st.number_input(
+    "ZIP으로 저장할 최대 블록 수(성능 보호)",
+    min_value=1,
+    max_value=len(block_keys),
+    value=min(len(block_keys), 100)
+)
 if st.button("모든 블록 그래프 ZIP 생성"):
     base_prefix = safe_name(f"{names[file_idx]}_blocks_{block_minutes}min_streak{streak_min}")
     zip_bytes = render_all_blocks_to_zip(blocks, infos, base_prefix, limit=int(max_zip))
@@ -276,7 +298,10 @@ if show_all:
     to_show = block_keys[:max_show]
     for i, k in enumerate(to_show, start=1):
         info = infos[k]
-        title = f"[{i}/{len(block_keys)}] {k.isoformat()} ~ {info['end'].isoformat()} | 이상치: {'예' if info['is_anomaly'] else '아니오'}"
+        title = (
+            f"[{i}/{len(block_keys)}] {k.isoformat()} ~ {info['end'].isoformat()} | "
+            f"이상치: {'예' if info['is_anomaly'] else '아니오'}"
+        )
         fig = plot_block(blocks[k], info, title)
         png = fig_to_png_bytes(fig)
         plt.close(fig)
@@ -290,7 +315,10 @@ else:
     idx = st.slider("표시할 블록 인덱스", 1, len(block_keys), 1)
     k = block_keys[idx - 1]
     info = infos[k]
-    title = f"[{idx}/{len(block_keys)}] {k.isoformat()} ~ {info['end'].isoformat()} | 이상치: {'예' if info['is_anomaly'] else '아니오'}"
+    title = (
+        f"[{idx}/{len(block_keys)}] {k.isoformat()} ~ {info['end'].isoformat()} | "
+        f"이상치: {'예' if info['is_anomaly'] else '아니오'}"
+    )
     fig = plot_block(blocks[k], info, title)
     png = fig_to_png_bytes(fig)
     plt.close(fig)
