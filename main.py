@@ -24,11 +24,17 @@ FONT_PATH = Path(__file__).parent / "font" / "NanumGothic.otf"
 # NanumGothic.otf 등록
 font_manager.fontManager.addfont(str(FONT_PATH))
 
-# Matplotlib 전역 설정
-rcParams["font.family"] = "NanumGothic"   # 폰트 패밀리명
-rcParams["axes.unicode_minus"] = False    # 마이너스 깨짐 방지
-# --------------- Streamlit 설정 ---------------
-st.set_page_config(page_title="에너지 로그: 10분 블록 뷰어", layout="wide")
+# 등록된 나눔 폰트 중 실제 사용 가능한 이름 선택
+nanum_fonts = [f.name for f in font_manager.fontManager.ttflist if "Nanum" in f.name]
+
+if "NanumGothicOTF" in nanum_fonts:
+    rcParams["font.family"] = "NanumGothicOTF"
+elif "NanumGothic" in nanum_fonts:
+    rcParams["font.family"] = "NanumGothic"
+else:
+    rcParams["font.family"] = "DejaVu Sans"  # fallback (Cloud 기본 폰트)
+
+rcParams["axes.unicode_minus"] = False  # 마이너스 깨짐 방지
 
 # --------------- 폰트 설정(한글 깨짐 방지) ---------------
 def set_korean_font() -> str:
