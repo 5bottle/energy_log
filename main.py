@@ -15,7 +15,8 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib import font_manager
 import streamlit as st
-
+plt.rcParams["font.family"] = "DejaVu Sans"   # 한글 지원 기본 폰트
+plt.rcParams["axes.unicode_minus"] = False    # 마이너스 깨짐 방지
 # --------------- Streamlit 설정 ---------------
 st.set_page_config(page_title="에너지 로그: 10분 블록 뷰어", layout="wide")
 
