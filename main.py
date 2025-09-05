@@ -15,8 +15,18 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib import font_manager
 import streamlit as st
-plt.rcParams["font.family"] = "DejaVu Sans"   # 한글 지원 기본 폰트
-plt.rcParams["axes.unicode_minus"] = False    # 마이너스 깨짐 방지
+from pathlib import Path
+from matplotlib import font_manager, rcParams
+
+# 📂 현재 main.py 파일이 있는 디렉토리 기준으로 font 경로 설정
+FONT_PATH = Path(__file__).parent / "font" / "NanumGothic.otf"
+
+# NanumGothic.otf 등록
+font_manager.fontManager.addfont(str(FONT_PATH))
+
+# Matplotlib 전역 설정
+rcParams["font.family"] = "NanumGothic"   # 폰트 패밀리명
+rcParams["axes.unicode_minus"] = False    # 마이너스 깨짐 방지
 # --------------- Streamlit 설정 ---------------
 st.set_page_config(page_title="에너지 로그: 10분 블록 뷰어", layout="wide")
 
