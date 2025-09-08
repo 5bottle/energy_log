@@ -186,10 +186,6 @@ def plot_block(block_df: pd.DataFrame, info: Dict, title: str):
     for (s, e) in info["intervals"]:
         ax.axvspan(s, e, color="orange", alpha=0.15, label="연속 이상 구간")
 
-    # 범례 중복 라벨 제거
-    handles, labels = ax.get_legend_handles_labels()
-    uniq = dict(zip(labels, handles))
-    ax.legend(uniq.values(), uniq.keys(), loc="best")
 
     ax.set_title(title)
     ax.set_xlabel("시간")
