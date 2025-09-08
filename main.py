@@ -157,6 +157,7 @@ def find_consecutive_runs_outside_band(
         runs.append((start, len(is_out) - 1))
 
     good = [(s, e) for s, e in runs if (e - s + 1) >= int(min_len)]
+    # 타임스탬프 튜플로 반환 (중요: 이후 로직은 이를 '인덱스'로 다시 접근하지 않음)
     return [(pd.Timestamp(times[s]), pd.Timestamp(times[e])) for s, e in good]
 
 
@@ -262,6 +263,10 @@ def analyze_sliding_windows(df: pd.DataFrame, win: int, stride: int, threshold: 
     """
     슬라이딩 윈도우(데이터 개수 기반)로 mean±threshold 밴드를 계산하고,
     각 윈도우 내에서 연속 이상(run)이 존재하면 해당 윈도우 [시작~끝]을 이상 구간 후보로 수집 → 병합.
+
+    ⚠️ 중요 수정:
+    - find_consecutive_runs_outside_band()가 (시작TS, 끝TS) 튜플을 반환하므로,
+      여기서는 그 결과를 '다시 인덱싱'하지 않고 그대로 사용한다.
     """
     ts = df["timestamp"].to_numpy()
     vals = df["value"].to_numpy()
@@ -275,6 +280,8 @@ def analyze_sliding_windows(df: pd.DataFrame, win: int, stride: int, threshold: 
         seg_vals = vals[i:j]
         seg_ts = ts[i:j]
         seg_df = pd.DataFrame({"timestamp": seg_ts, "value": seg_vals})
+
+        # runs는 (start_ts, end_ts) 리스트
         runs = find_consecutive_runs_outside_band(seg_df, streak_min_, threshold)
         is_anom = len(runs) > 0
 
@@ -290,9 +297,11 @@ def analyze_sliding_windows(df: pd.DataFrame, win: int, stride: int, threshold: 
         })
 
         if is_anom:
+            # 윈도우 자체 구간 후보
             window_intervals.append((pd.Timestamp(seg_ts[0]), pd.Timestamp(seg_ts[-1])))
-            for (s, e) in runs:
-                point_runs.append((pd.Timestamp(seg_ts[s]), pd.Timestamp(seg_ts[e])))
+            # 포인트 연속 구간(타임스탬프)을 그대로 수집 (인덱싱 금지!)
+            for (s_ts, e_ts) in runs:
+                point_runs.append((pd.Timestamp(s_ts), pd.Timestamp(e_ts)))
 
     merged = merge_time_intervals(window_intervals)
     return window_rows, merged, point_runs
@@ -322,9 +331,11 @@ def plot_series_with_anomalies(
             if not out_df.empty:
                 ax.scatter(out_df["timestamp"], out_df["value"], s=16, zorder=3)
 
+    # 병합된 윈도우 이상 구간 음영
     for (s, e) in anomalous_intervals:
         ax.axvspan(s, e, color="orange", alpha=0.15)
 
+    # 필요하면 포인트 런도 추가 음영/마커로 표현할 수 있음 (현재는 윈도우 음영만)
     ax.set_title("시계열 및 이상 구간(슬라이딩 분석)")
     ax.set_xlabel("시간")
     ax.set_ylabel("값")
