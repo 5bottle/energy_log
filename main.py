@@ -10,6 +10,7 @@
 # - 슬라이딩 윈도우(데이터 개수 기반) + Stride 분석 섹션
 # - 분석용 타임스탬프 범위 선택(슬라이딩 분석에만 적용)
 # - "로그 분석" 버튼으로 이상 구간(시간대) 표/CSV 및 시각화
+# - 이상 판정 기준: 평균±임계치 바깥의 값이 streak_min개 이상 "연속"으로 등장
 
 from typing import Dict, List, Tuple
 from pathlib import Path
@@ -25,10 +26,6 @@ import streamlit as st
 
 # -------------------- 폰트 설정 (한글 깨짐 방지) --------------------
 def setup_korean_font():
-    """
-    1) font/NanumGothic.otf 있으면 등록 후 'NanumGothicOTF' 또는 'NanumGothic' 사용
-    2) 없으면 시스템 폰트 중 'NanumGothic' → 'Noto Sans CJK KR' → 'DejaVu Sans' 순으로 시도
-    """
     try:
         font_path = Path(__file__).parent / "font" / "NanumGothic.otf"
         if font_path.exists():
@@ -107,10 +104,8 @@ def load_log(file) -> pd.DataFrame:
         na_values=["", "NaN", "nan"]
     )
     df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-    # 밀리초 제외(초 단위 내림)
-    df["timestamp"] = df["timestamp"].dt.floor("S")
+    df["timestamp"] = df["timestamp"].dt.floor("S")  # 밀리초 제거(초 단위)
     df = df.dropna(subset=["timestamp", "value"]).copy()
-    # (요청) 타임존/현재 시각 정보 사용하지 않음 → 로컬라이즈/변환 제거
     return df.sort_values("timestamp")
 
 # -------------------- 블록 분할 --------------------
@@ -121,14 +116,13 @@ def split_into_blocks(df: pd.DataFrame, minutes: int) -> Dict[pd.Timestamp, pd.D
     blocks = {k: v.drop(columns=["block_start"]) for k, v in df2.groupby("block_start", sort=True)}
     return blocks
 
-# -------------------- 이상치(연속 구간) 탐지(블록용 재사용) --------------------
+# -------------------- 이상치(연속 구간) 탐지(블록/슬라이딩 공용) --------------------
 def find_consecutive_runs_outside_band(
     block_df: pd.DataFrame, min_len: int, threshold: float
 ) -> List[Tuple[pd.Timestamp, pd.Timestamp]]:
     """
-    평균 ± threshold 를 벗어나는 값(|x - mean| > threshold)이
-    연속으로 나타나는 구간(start_ts, end_ts) 리스트를 반환.
-    min_len 이상 길이의 연속 구간만 유지.
+    평균 ± threshold 바깥(|x - mean| > threshold)의 포인트가
+    'min_len'개 이상 연속으로 나타나는 구간(start_ts, end_ts)을 반환.
     """
     if block_df.empty:
         return []
@@ -138,8 +132,7 @@ def find_consecutive_runs_outside_band(
     times = block_df["timestamp"].to_numpy()
 
     is_out = np.abs(values - mean_val) > float(threshold)
-    runs: List[Tuple[int, int]] = []  # (start_idx, end_idx) inclusive
-
+    runs: List[Tuple[int, int]] = []
     start = None
     for i, flag in enumerate(is_out):
         if flag and start is None:
@@ -151,11 +144,7 @@ def find_consecutive_runs_outside_band(
         runs.append((start, len(is_out) - 1))
 
     good_runs = [(s, e) for s, e in runs if (e - s + 1) >= int(min_len)]
-
-    intervals: List[Tuple[pd.Timestamp, pd.Timestamp]] = []
-    for s, e in good_runs:
-        intervals.append((pd.Timestamp(times[s]), pd.Timestamp(times[e])))
-    return intervals
+    return [(pd.Timestamp(times[s]), pd.Timestamp(times[e])) for s, e in good_runs]
 
 def analyze_block(block_df: pd.DataFrame, min_streak: int, threshold: float) -> Dict:
     mean_val = float(block_df["value"].mean())
@@ -177,26 +166,21 @@ def analyze_block(block_df: pd.DataFrame, min_streak: int, threshold: float) -> 
 # -------------------- 그리기(블록) --------------------
 def plot_block(block_df: pd.DataFrame, info: Dict, title: str):
     fig, ax = plt.subplots(figsize=(11, 4))
-    # 원본 값
-    ax.plot(block_df["timestamp"], block_df["value"], label="원본 값")
-    # 블록 평균선
-    ax.axhline(info["mean"], linestyle="--", linewidth=1, label="블록 평균")
+    ax.plot(block_df["timestamp"], block_df["value"])
+    ax.axhline(info["mean"], linestyle="--", linewidth=1)
 
-    # 임계 밴드(±threshold): 빨간 점선
     upper = info["mean"] + info["threshold"]
     lower = info["mean"] - info["threshold"]
-    ax.axhline(upper, color="red", linestyle="--", linewidth=1, label=f"임계 상한(+{info['threshold']:.2f})")
-    ax.axhline(lower, color="red", linestyle="--", linewidth=1, label=f"임계 하한(-{info['threshold']:.2f})")
+    ax.axhline(upper, color="red", linestyle="--", linewidth=1)
+    ax.axhline(lower, color="red", linestyle="--", linewidth=1)
 
-    # 임계 초과 포인트 마커
     out_mask = (block_df["value"] > upper) | (block_df["value"] < lower)
     out_df = block_df[out_mask]
     if not out_df.empty:
-        ax.scatter(out_df["timestamp"], out_df["value"], marker="o", s=30, label="임계 초과", zorder=3)
+        ax.scatter(out_df["timestamp"], out_df["value"], marker="o", s=30, zorder=3)
 
-    # 연속 이상 구간을 연한 주황색으로 음영 표시
     for (s, e) in info["intervals"]:
-        ax.axvspan(s, e, color="orange", alpha=0.15, label="연속 이상 구간")
+        ax.axvspan(s, e, color="orange", alpha=0.15)
 
     ax.set_title(title)
     ax.set_xlabel("시간")
@@ -219,11 +203,8 @@ def render_all_blocks_to_zip(
             keys = keys[:limit]
         for i, k in enumerate(keys, start=1):
             info = infos[k]
-            title = (
-                f"{k.isoformat()} ~ {info['end'].isoformat()} | "
-                f"이상치:{'예' if info['is_anomaly'] else '아니오'}"
-            )
-            fig = plot_block(blocks[k], info, title)  # 화면에도 렌더됨
+            title = f"{k.isoformat()} ~ {info['end'].isoformat()} | 이상치:{'예' if info['is_anomaly'] else '아니오'}"
+            fig = plot_block(blocks[k], info, title)
             png_bytes = fig_to_png_bytes(fig)
             plt.close(fig)
             fname = f"{base_prefix}_{i:03d}_{'ANOM' if info['is_anomaly'] else 'OK'}_{safe_name(k.isoformat())}.png"
@@ -231,19 +212,17 @@ def render_all_blocks_to_zip(
     mem.seek(0)
     return mem.read()
 
-# ==================== [여기부터 추가: 슬라이딩 윈도우 분석 전용] ====================
+# ==================== [추가: 슬라이딩 윈도우 분석 전용] ====================
 
 def iter_windows(n_total: int, win: int, stride: int):
-    """전체 길이 n_total에서 (win, stride) 슬라이딩 시작 인덱스 생성"""
     if win <= 0 or stride <= 0:
         return
     i = 0
     while i + win <= n_total:
-        yield i, i + win  # [i, j)
+        yield i, i + win
         i += stride
 
 def merge_time_intervals(intervals: List[Tuple[pd.Timestamp, pd.Timestamp]]) -> List[Tuple[pd.Timestamp, pd.Timestamp]]:
-    """겹치거나 맞닿는 구간 병합"""
     if not intervals:
         return []
     iv = sorted(intervals, key=lambda x: x[0])
@@ -257,10 +236,6 @@ def merge_time_intervals(intervals: List[Tuple[pd.Timestamp, pd.Timestamp]]) -> 
     return merged
 
 def analyze_sliding_windows(df: pd.DataFrame, win: int, stride: int, threshold: float, streak_min_: int):
-    """
-    슬라이딩 윈도우(데이터 개수 기반)로 mean±threshold 밴드를 계산하고,
-    각 윈도우 내에서 연속 이상(run)이 존재하면 해당 윈도우 [시작~끝]을 이상 구간 후보로 수집 → 병합.
-    """
     ts = df["timestamp"].to_numpy()
     vals = df["value"].to_numpy()
     n = len(df)
@@ -296,33 +271,29 @@ def analyze_sliding_windows(df: pd.DataFrame, win: int, stride: int, threshold: 
     return window_rows, merged, point_runs
 
 def plot_series_with_anomalies(df: pd.DataFrame, win: int, threshold: float, anomalous_intervals, point_runs, show_points: bool):
-    """분석 범위 시계열에 이상 구간 음영 + 롤링 평균/임계 밴드 표시"""
     fig, ax = plt.subplots(figsize=(12, 4.5))
-    ax.plot(df["timestamp"], df["value"], linewidth=1.0, label="원본 값")
+    ax.plot(df["timestamp"], df["value"], linewidth=1.0)
 
     if win > 1 and win <= len(df):
         roll = df["value"].rolling(window=win, min_periods=max(1, win//5)).mean()
-        ax.plot(df["timestamp"], roll, linestyle="--", linewidth=1.0, label=f"롤링 평균({win})")
-        ax.plot(df["timestamp"], roll + threshold, linestyle=":", linewidth=1.0, label=f"임계 상한(+{threshold:.2f})")
-        ax.plot(df["timestamp"], roll - threshold, linestyle=":", linewidth=1.0, label=f"임계 하한(-{threshold:.2f})")
+        ax.plot(df["timestamp"], roll, linestyle="--", linewidth=1.0)
+        ax.plot(df["timestamp"], roll + threshold, linestyle=":", linewidth=1.0)
+        ax.plot(df["timestamp"], roll - threshold, linestyle=":", linewidth=1.0)
 
         if show_points:
             out_mask = (df["value"] > (roll + threshold)) | (df["value"] < (roll - threshold))
             out_df = df[out_mask]
             if not out_df.empty:
-                ax.scatter(out_df["timestamp"], out_df["value"], s=16, label="임계 초과", zorder=3)
+                ax.scatter(out_df["timestamp"], out_df["value"], s=16, zorder=3)
 
     for (s, e) in anomalous_intervals:
-        ax.axvspan(s, e, color="orange", alpha=0.15, label="이상 구간")
+        ax.axvspan(s, e, color="orange", alpha=0.15)
 
     ax.set_title("시계열 및 이상 구간(슬라이딩 분석)")
     ax.set_xlabel("시간")
     ax.set_ylabel("값")
     ax.grid(True, alpha=0.25)
-    # 범례는 기존 뷰어와 구분되므로 유지
-    handles, labels = ax.get_legend_handles_labels()
-    uniq = dict(zip(labels, handles))
-    ax.legend(uniq.values(), uniq.keys(), loc="best", framealpha=0.9)
+    # 범례 제거(요청 취향 반영)
     st.pyplot(fig)
     return fig
 
